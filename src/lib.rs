@@ -79,24 +79,24 @@ extern crate futures;
 extern crate hyper;
 
 use futures::future::FutureResult;
-use hyper::header::CONTENT_LENGTH;
-use hyper::service::Service;
 use hyper::{Body, Request, Response};
-
+use hyper::header::CONTENT_LENGTH;
 use hyper::Method;
+use hyper::service::Service;
 use hyper::StatusCode;
-
-mod builder;
-pub mod handlers;
-mod path;
-pub mod route;
 
 pub use self::builder::RouterBuilder;
 pub use self::path::Path;
 pub use self::route::Route;
 pub use self::route::RouteBuilder;
 
+mod builder;
+pub mod handlers;
+mod path;
+pub mod route;
+
 pub type Handler = fn(Request<Body>) -> Response<Body>;
+pub type Middleware = fn(Handler) -> Handler;
 pub type HttpResult<T> = Result<T, StatusCode>;
 
 /// This is the one. The router.
@@ -160,6 +160,7 @@ impl Router {
 pub struct RouterService {
     pub router: Router,
     pub error_handler: fn(StatusCode) -> Response<Body>,
+    middleware: Vec<Middleware>,
 }
 
 impl RouterService {
@@ -167,6 +168,28 @@ impl RouterService {
         RouterService {
             router,
             error_handler: Self::default_error_handler,
+            middleware: Vec::new(),
+        }
+    }
+
+    pub fn add_middleware(mut self, middleware: Middleware) -> Self {
+        self.middleware.push(middleware);
+        self
+    }
+
+    fn middleware(&self, next: Handler) -> Handler {
+        if self.middleware.len() == 0 {
+            next
+        } else {
+            self.next_middleware(self.middleware.len() - 1, next)
+        }
+    }
+
+    fn next_middleware(&self, index: usize, next: Handler) -> Handler {
+        let current = self.middleware.get(index).unwrap();
+        match index == 0 {
+            true => current(next),
+            false => current(self.next_middleware(index - 1, next))
         }
     }
 
@@ -191,7 +214,7 @@ impl Service for RouterService {
 
     fn call(&mut self, request: Request<Self::ReqBody>) -> Self::Future {
         futures::future::ok(match self.router.find_handler(&request) {
-            Ok(handler) => handler(request),
+            Ok(handler) => self.middleware(handler)(request),
             Err(status_code) => (self.error_handler)(status_code),
         })
     }
